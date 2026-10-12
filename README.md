@@ -61,23 +61,38 @@ while panning and zooming; MapKit re-requests tiles at each new zoom level.
 
 ### Tweaking the look
 
-All knobs live in `Map/HeatMapStyle.swift`:
+The toolbar's **View** menu switches between three presets (Soft, Classic,
+Thermal) and an opacity level; both are remembered. The presets and every
+knob live in `Map/HeatMapStyle.swift`:
 
 | Knob | Effect |
 | --- | --- |
-| `cellPixels` | Bin size on screen (default 3 px). Smaller = sharper, more work per tile. |
-| `blurPixels` | Gaussian radius on screen (default 14 px). Bigger = smoother, wider blobs. |
-| `maxAlpha` | Opacity of the hottest color. |
-| `alphaFadeIn` | Fraction of the range over which the fringe fades from transparent. |
-| `gamma` | < 1 brightens sparse areas, > 1 emphasises the densest clusters. |
+| `cellPixels` | Bin size on screen (Soft: 2 px). Smaller = sharper, more work per tile. |
+| `blurPixels` | Gaussian radius on screen (Soft: 8 px). Bigger = smoother, wider blobs. |
+| `scaling` | `.power` keeps gradient inside blobs (Google Photos look); `.log` flattens very skewed libraries. |
+| `gamma` | Exponent on the normalized density. < 1 brightens sparse areas, > 1 emphasises the densest clusters. |
+| `maxAlpha` | Opacity of the hottest color (scaled by the Opacity menu). |
+| `alphaFadeIn` | Fraction of the range over which the fringe fades from transparent. Small = crisp translucent edge. |
 | `minReference` | Floor for the normalization reference (blurred photo-count units). |
-| `ramp` | The cool→hot color stops. `classicRamp` (blue→cyan→green→yellow→red) is the default; `thermalRamp` is an alternative. |
+| `ramp` | Color stops. `softRamp` (violet→magenta→orange→yellow) is the default; `classicRamp` and `thermalRamp` are alternatives. |
 
-`AppModel.heatStyle` is the live style; changing it from code (or a future
-settings UI) rebuilds the lookup table and redraws.
+To add a preset, append a `HeatMapStyle` to `HeatMapStyle.presets`; it shows up
+in the menu automatically.
 
 If the heat tiles ever appear vertically mirrored on some OS version, the one
 place to look is the flip at the end of `HeatMapRenderer.draw`.
+
+## Map view
+
+The **View** menu also picks the base map (Standard, Muted, Satellite, Hybrid)
+and the projection: *Flat*, or *Globe & Terrain* (MapKit's realistic elevation,
+which shows a 3-D globe when zoomed out). These are `MKMapConfiguration`s built
+in `Map/MapAppearance.swift` and persisted in UserDefaults.
+
+On launch the map opens on your current area (about 40 km across) using a
+one-shot CoreLocation fix; your position is never drawn. If location access is
+denied or slow, it falls back to fitting the central 96 % of your photos. The
+**My Location** toolbar button jumps back there at any time.
 
 ## Grid, paging and performance notes
 
@@ -115,9 +130,10 @@ place to look is the flip at the end of `HeatMapRenderer.draw`.
 
 ## Project settings worth knowing
 
-* Deployment target 14.0; App Sandbox with the Photos Library and outgoing
-  network (map tiles, iCloud originals) entitlements in `Photos Heat Map.entitlements`.
-* `NSPhotoLibraryUsageDescription` is set through `INFOPLIST_KEY_…` in the target.
+* Deployment target 14.0; App Sandbox with the Photos Library, Location and
+  outgoing network (map tiles, iCloud originals) entitlements in `Photos Heat Map.entitlements`.
+* `NSPhotoLibraryUsageDescription` and the location usage strings are set through
+  `INFOPLIST_KEY_…` build settings in the target.
 * Default actor isolation is `nonisolated` (classic model): `AppModel` is
   explicitly `@MainActor`, PhotoKit reads live in the `PhotoLibraryIndexer`
   actor, and the renderer is lock-protected because MapKit draws on multiple threads.

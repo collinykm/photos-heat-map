@@ -10,6 +10,7 @@ import Foundation
 import Observation
 import Photos
 import MapKit
+import CoreLocation
 
 /// Paging rule for the grid: a page is at least `pageSize` items, or everything
 /// within `pageDays` of the first item in the page, whichever is more.
@@ -44,7 +45,11 @@ final class AppModel {
     private(set) var heatIndex: SpatialIndex = .empty
     /// Set when the model wants the map to move to a rect (initial fit, album change).
     private(set) var fitRequest: MapFitRequest?
-    var heatStyle = HeatMapStyle()
+    /// Live heat style = selected preset with its opacity scaled by `heatOpacity`.
+    private(set) var heatStyle: HeatMapStyle = .soft
+    private(set) var heatPresetName: String = HeatMapStyle.soft.name
+    private(set) var heatOpacity: Double = 1.0
+    private(set) var mapAppearance: MapAppearance = .load()
     /// Visible part of the map, debounced so the grid is not re-queried 60× a second.
     private(set) var visibleMapRect: MKMapRect = .world
 
@@ -81,6 +86,7 @@ final class AppModel {
     private(set) var filtersAffectMap = true
 
     @ObservationIgnored private let indexer = PhotoLibraryIndexer()
+    @ObservationIgnored private let locationProvider: LocationProvider
     @ObservationIgnored private var scanTask: Task<Void, Never>?
     @ObservationIgnored private var indexTask: Task<Void, Never>?
     @ObservationIgnored private var indexGeneration = 0
@@ -139,7 +145,21 @@ final class AppModel {
         scanTask = Task { await self.loadLibrary() }
     }
 
+    init() {
+        locationProvider = LocationProvider()
+        let defaults = UserDefaults.standard
+        if let name = defaults.string(forKey: "heat.preset"), HeatMapStyle.preset(named: name) != nil {
+            heatPresetName = name
+        }
+        let opacity = defaults.double(forKey: "heat.opacity")
+        if opacity > 0 { heatOpacity = opacity }
+        applyHeatStyle()
+    }
+
     private func loadLibrary() async {
+        // Ask for the user's area while the (much slower) library scan runs.
+        async let location = locationProvider.currentLocation(timeout: .seconds(8))
+
         phase = .requestingAccess
         var status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         if status == .notDetermined {
@@ -164,7 +184,10 @@ final class AppModel {
         if !selectedAlbum.isEntireLibrary {
             albumAssetIDs = await indexer.albumMembership(albumID: selectedAlbum.id)
         }
-        rebuildIndex(fitMap: true)
+        // Open on the user's area when we know it (no position marker is drawn);
+        // otherwise fit the data.
+        let focus = await location?.coordinate
+        rebuildIndex(fitMap: true, focus: focus)
         installChangeObserver()
         userAlbums = await indexer.fetchUserAlbums()
         albums = await indexer.fetchAllAlbums()
@@ -202,7 +225,7 @@ final class AppModel {
     /// Rebuilds the spatial index from the current selection off the main thread.
     /// `resetPage` = false keeps the grid's current page/scroll position (used for
     /// in-place library changes such as favorites or deletions).
-    func rebuildIndex(fitMap: Bool, resetPage: Bool = true) {
+    func rebuildIndex(fitMap: Bool, resetPage: Bool = true, focus: CLLocationCoordinate2D? = nil) {
         indexTask?.cancel()
         indexGeneration += 1
         let generation = indexGeneration
@@ -215,11 +238,70 @@ final class AppModel {
             }.value
             guard !Task.isCancelled, generation == self.indexGeneration else { return }
             self.heatIndex = built
-            if fitMap, !built.isEmpty {
-                self.fitRequest = MapFitRequest(rect: built.rectContaining(fraction: 0.96), animated: false)
+            if fitMap {
+                if let focus {
+                    self.fitRequest = MapFitRequest(rect: Self.mapRect(around: focus, meters: Self.homeAreaMeters), animated: false)
+                } else if !built.isEmpty {
+                    self.fitRequest = MapFitRequest(rect: built.rectContaining(fraction: 0.96), animated: false)
+                }
             }
             self.requeryVisible(resetPage: resetPage)
         }
+    }
+
+    // MARK: - Appearance
+
+    func setMapAppearance(_ appearance: MapAppearance) {
+        guard appearance != mapAppearance else { return }
+        mapAppearance = appearance
+        appearance.save()
+    }
+
+    func selectHeatPreset(named name: String) {
+        guard HeatMapStyle.preset(named: name) != nil else { return }
+        heatPresetName = name
+        UserDefaults.standard.set(name, forKey: "heat.preset")
+        applyHeatStyle()
+    }
+
+    func setHeatOpacity(_ opacity: Double) {
+        heatOpacity = min(max(opacity, 0.1), 1.0)
+        UserDefaults.standard.set(heatOpacity, forKey: "heat.opacity")
+        applyHeatStyle()
+    }
+
+    private func applyHeatStyle() {
+        var style = HeatMapStyle.preset(named: heatPresetName) ?? .soft
+        style.maxAlpha = min(1, style.maxAlpha * heatOpacity)
+        heatStyle = style
+    }
+
+    // MARK: - Location
+
+    /// Width/height of the "current area" the map opens on.
+    nonisolated static let homeAreaMeters: Double = 40_000
+
+    nonisolated static func mapRect(around coordinate: CLLocationCoordinate2D, meters: Double) -> MKMapRect {
+        let region = MKCoordinateRegion(center: coordinate, latitudinalMeters: meters, longitudinalMeters: meters)
+        let halfLat = region.span.latitudeDelta / 2
+        let halfLon = region.span.longitudeDelta / 2
+        let topLeft = MKMapPoint(CLLocationCoordinate2D(latitude: min(coordinate.latitude + halfLat, 85),
+                                                        longitude: max(coordinate.longitude - halfLon, -180)))
+        let bottomRight = MKMapPoint(CLLocationCoordinate2D(latitude: max(coordinate.latitude - halfLat, -85),
+                                                            longitude: min(coordinate.longitude + halfLon, 180)))
+        return MKMapRect(x: topLeft.x, y: topLeft.y,
+                         width: max(bottomRight.x - topLeft.x, 1), height: max(bottomRight.y - topLeft.y, 1))
+    }
+
+    /// Toolbar action: pan/zoom to the user's current area (still without a marker).
+    func goToCurrentLocation() async {
+        guard let location = await locationProvider.currentLocation(timeout: .seconds(8)) else {
+            errorMessage = locationProvider.isDenied
+                ? "Location access is off for Photos Heat Map. Enable it in System Settings › Privacy & Security › Location Services."
+                : "Your location could not be determined."
+            return
+        }
+        fitRequest = MapFitRequest(rect: Self.mapRect(around: location.coordinate, meters: Self.homeAreaMeters), animated: true)
     }
 
     // MARK: - Map region

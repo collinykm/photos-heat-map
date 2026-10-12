@@ -251,6 +251,8 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSLocationUsageDescription = "Photos Heat Map uses your approximate location only to open the map on your area. Your position is never shown.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Photos Heat Map uses your approximate location only to open the map on your area. Your position is never shown.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Photos Heat Map reads the location, date and thumbnails of your photos to draw a heat map, and needs write access to favorite, delete or add photos to albums.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -285,6 +287,8 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSLocationUsageDescription = "Photos Heat Map uses your approximate location only to open the map on your area. Your position is never shown.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Photos Heat Map uses your approximate location only to open the map on your area. Your position is never shown.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Photos Heat Map reads the location, date and thumbnails of your photos to draw a heat map, and needs write access to favorite, delete or add photos to albums.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

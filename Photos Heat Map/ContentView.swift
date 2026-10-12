@@ -38,7 +38,14 @@ struct ContentView: View {
                     ProgressView().controlSize(.small)
                 }
             }
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    Task { await model.goToCurrentLocation() }
+                } label: {
+                    Label("My Location", systemImage: "location")
+                }
+                .help("Show the map around your current location")
+                MapViewMenu()
                 Button {
                     model.reload()
                 } label: {
@@ -79,19 +86,20 @@ struct ContentView: View {
         HeatMapView(
             index: model.heatIndex,
             style: model.heatStyle,
+            appearance: model.mapAppearance,
             fitRequest: model.fitRequest,
             onVisibleRectChange: { rect in model.mapVisibleRectChanged(rect) }
         )
+        // Bottom-left keeps clear of MapKit's zoom/compass controls on the right.
         .overlay(alignment: .bottomLeading) {
-            LibrarySummaryView()
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
-                .padding(10)
-        }
-        .overlay(alignment: .bottomTrailing) {
-            HeatLegendView(style: model.heatStyle)
-                .padding(10)
+            VStack(alignment: .leading, spacing: 6) {
+                LibrarySummaryView()
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+                HeatLegendView(style: model.heatStyle)
+            }
+            .padding(10)
         }
         .overlay {
             if model.heatIndex.isEmpty && !model.allAssets.isEmpty {

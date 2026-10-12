@@ -246,13 +246,14 @@ final class HeatMapRenderer: MKOverlayRenderer {
         let reference = referenceDensity(zoomScale: zoomScale, index: index, style: style, kernel: kernel)
         let logReference = log1p(reference)
         let gamma = style.gamma
+        let useLog = style.scaling == .log
         var pixels = [UInt8](repeating: 0, count: cols * rows * 4)
         pixels.withUnsafeMutableBufferPointer { px in
             lut.withUnsafeBufferPointer { table in
                 for i in 0..<(cols * rows) {
                     let v = blurred[i]
                     if v <= 0 { continue }
-                    var t = log1p(Double(v)) / logReference
+                    var t = useLog ? log1p(Double(v)) / logReference : Double(v) / reference
                     if t > 1 { t = 1 }
                     if gamma != 1 { t = pow(t, gamma) }
                     let li = Int(t * 255 + 0.5) * 4

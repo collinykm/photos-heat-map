@@ -22,19 +22,22 @@ struct MapFitRequest: Equatable {
 struct HeatMapView: NSViewRepresentable {
     let index: SpatialIndex
     let style: HeatMapStyle
+    let appearance: MapAppearance
     let fitRequest: MapFitRequest?
     let onVisibleRectChange: (MKMapRect) -> Void
 
     func makeNSView(context: Context) -> MKMapView {
         let map = MKMapView()
         map.delegate = context.coordinator
-        map.mapType = .mutedStandard
-        map.pointOfInterestFilter = .excludingAll
+        map.preferredConfiguration = appearance.makeConfiguration()
+        context.coordinator.appearance = appearance
+        map.showsUserLocation = false
         map.showsZoomControls = true
-        map.showsCompass = false
+        map.showsCompass = true
         map.showsScale = true
-        map.isPitchEnabled = false
-        map.isRotateEnabled = false
+        map.showsPitchControl = true
+        map.isPitchEnabled = true
+        map.isRotateEnabled = true
 
         let overlay = HeatMapOverlay()
         let renderer = HeatMapRenderer(overlay: overlay, style: style)
@@ -59,6 +62,10 @@ struct HeatMapView: NSViewRepresentable {
             coordinator.style = style
             coordinator.renderer?.update(style: style)
         }
+        if coordinator.appearance != appearance {
+            coordinator.appearance = appearance
+            map.preferredConfiguration = appearance.makeConfiguration()
+        }
         if let fit = fitRequest, fit.id != coordinator.lastFitID {
             coordinator.lastFitID = fit.id
             let padding = NSEdgeInsets(top: 40, left: 40, bottom: 40, right: 40)
@@ -77,6 +84,7 @@ struct HeatMapView: NSViewRepresentable {
         var renderer: HeatMapRenderer?
         var indexID: UUID?
         var style: HeatMapStyle?
+        var appearance: MapAppearance?
         var lastFitID: UUID?
         var onVisibleRectChange: ((MKMapRect) -> Void)?
         private var frameObserver: NSObjectProtocol?
