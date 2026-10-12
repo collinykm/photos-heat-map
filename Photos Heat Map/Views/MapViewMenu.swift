@@ -42,6 +42,12 @@ struct MapViewMenu: View {
                     ))
                 }
             }
+            Section("Heat Layer") {
+                Toggle("Show Heat Layer", isOn: Binding(
+                    get: { model.showsHeatLayer },
+                    set: { model.showsHeatLayer = $0 }
+                ))
+            }
             Section("Heat Style") {
                 ForEach(HeatMapStyle.presets, id: \.name) { preset in
                     Toggle(preset.name, isOn: Binding(

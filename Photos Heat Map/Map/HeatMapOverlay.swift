@@ -25,10 +25,26 @@ import CoreGraphics
 import CoreLocation
 
 final class HeatMapOverlay: NSObject, MKOverlay {
-    var coordinate: CLLocationCoordinate2D {
-        MKMapPoint(x: MKMapRect.world.midX, y: MKMapRect.world.midY).coordinate
+    let boundingMapRect: MKMapRect
+
+    /// Keep the overlay no larger than needed: MapKit culls tiles outside it, and a
+    /// world-sized overlay is more likely to interfere with the 3-D globe.
+    init(boundingMapRect: MKMapRect) {
+        self.boundingMapRect = boundingMapRect.isNull ? .world : boundingMapRect
+        super.init()
     }
-    var boundingMapRect: MKMapRect { .world }
+
+    var coordinate: CLLocationCoordinate2D {
+        MKMapPoint(x: boundingMapRect.midX, y: boundingMapRect.midY).coordinate
+    }
+
+    /// The data's bounding rect padded by the largest blur extent the renderer can need
+    /// (a kernel of a few dozen pixels on a world-sized tile), clamped to the world.
+    static func paddedRect(for data: MKMapRect) -> MKMapRect {
+        guard !data.isNull else { return .world }
+        let pad = MKMapRect.world.width * 0.15
+        return data.insetBy(dx: -pad, dy: -pad).intersection(.world)
+    }
 }
 
 final class HeatMapRenderer: MKOverlayRenderer {
@@ -86,7 +102,7 @@ final class HeatMapRenderer: MKOverlayRenderer {
     private static func geometry(for mapRect: MKMapRect, zoomScale: MKZoomScale, style: HeatMapStyle) -> TileGeometry {
         let mapPointsPerPixel = 1.0 / Double(zoomScale)
         let cellSize = max(style.cellPixels, 1) * mapPointsPerPixel
-        let blurCells = max(1, Int((style.blurPixels / max(style.cellPixels, 1)).rounded(.up)))
+        let blurCells = max(1, Int((style.kernelRadiusPixels / max(style.cellPixels, 1)).rounded(.up)))
         let pad = blurCells
         let cols = Int((mapRect.width / cellSize).rounded(.up)) + 2 * pad
         let rows = Int((mapRect.height / cellSize).rounded(.up)) + 2 * pad
@@ -97,18 +113,17 @@ final class HeatMapRenderer: MKOverlayRenderer {
                             paddedRect: padded, blurCells: blurCells)
     }
 
+    /// Peak-1 Gaussian: a photo contributes exactly 1 at its own cell, so the blurred
+    /// raster reads as "stacked photo equivalents".
     private static func gaussianKernel(radius: Int, sigma: Double) -> [Float] {
         var kernel = [Float](repeating: 0, count: 2 * radius + 1)
-        var sum: Float = 0
         for i in -radius...radius {
-            let v = Float(exp(-Double(i * i) / (2 * sigma * sigma)))
-            kernel[i + radius] = v
-            sum += v
+            kernel[i + radius] = Float(exp(-Double(i * i) / (2 * sigma * sigma)))
         }
-        return kernel.map { $0 / sum }
+        return kernel
     }
 
-    /// Separable blur using "scatter" loops, which is cheap on sparse rasters.
+    /// Separable convolution using "scatter" loops, which is cheap on sparse rasters.
     private static func blur(_ src: [Float], cols: Int, rows: Int, kernel: [Float]) -> [Float] {
         let r = kernel.count / 2
         var tmp = [Float](repeating: 0, count: src.count)
@@ -243,17 +258,19 @@ final class HeatMapRenderer: MKOverlayRenderer {
         let blurred = Self.blur(grid, cols: cols, rows: rows, kernel: kernel)
 
         // 4. Normalize + colorize.
-        let reference = referenceDensity(zoomScale: zoomScale, index: index, style: style, kernel: kernel)
+        let relative = style.scaling == .relative
+        let reference = relative
+            ? referenceDensity(zoomScale: zoomScale, index: index, style: style, kernel: kernel)
+            : max(style.saturation, 0.001)
         let logReference = log1p(reference)
         let gamma = style.gamma
-        let useLog = style.scaling == .log
         var pixels = [UInt8](repeating: 0, count: cols * rows * 4)
         pixels.withUnsafeMutableBufferPointer { px in
             lut.withUnsafeBufferPointer { table in
                 for i in 0..<(cols * rows) {
                     let v = blurred[i]
                     if v <= 0 { continue }
-                    var t = useLog ? log1p(Double(v)) / logReference : Double(v) / reference
+                    var t = relative ? log1p(Double(v)) / logReference : Double(v) / reference
                     if t > 1 { t = 1 }
                     if gamma != 1 { t = pow(t, gamma) }
                     let li = Int(t * 255 + 0.5) * 4

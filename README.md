@@ -29,32 +29,34 @@ The project uses an Xcode "synchronized folder", so every file under
 
 ## How the heat map works
 
-MapKit has no heat map, so `HeatMapRenderer` (an `MKOverlayRenderer` on a
-world-spanning overlay) draws one tile at a time in `draw(_:zoomScale:in:)`,
-which MapKit calls on background threads:
+MapKit has no heat map, so `HeatMapRenderer` (an `MKOverlayRenderer` on an
+overlay that covers the data's bounding box) draws one tile at a time in
+`draw(_:zoomScale:in:)`, which MapKit calls on background threads:
 
-1. **Bin size follows the zoom.** A bin is `cellPixels` wide *on screen*, so its
-   size in map points is `cellPixels / zoomScale`. Zooming in automatically
-   makes bins (and the blur) cover a smaller area; zooming out merges photos
-   into bigger bins.
+1. **Bins follow the zoom.** A bin is `cellPixels` wide *on screen*, so its size
+   in map points is `cellPixels / zoomScale`.
 2. **Gather.** The renderer asks `SpatialIndex` (all assets sorted by map-point
    x, binary-searched by x and filtered by y) for every point inside the tile
-   *plus a margin of one blur radius*, so blobs are not clipped at tile seams.
-   Points are accumulated into a small `Float` raster (roughly 90×90 cells for
-   a 256 pt tile).
-3. **Blur.** A separable Gaussian blur, radius `ceil(blurPixels / cellPixels)`
-   cells, sigma = radius / 2.5. It "scatters" from non-empty cells, which is
-   cheap because most cells are empty.
-4. **Normalize.** The blurred density is log-scaled against a *reference*
-   density: the densest blurred bin anywhere in the data set at this zoom
-   level (binned over all points at the quantized zoom, then the 2-D kernel
-   evaluated at the 48 densest raw bins). It is cached per zoom level, so every
-   tile at that zoom shares one scale and there are no seams. `minReference`
-   stops a single photo from being painted red in a sparse library.
-   `t = (log1p(density) / log1p(reference)) ^ gamma`
-5. **Colorize + blit.** `t` indexes a 256-entry premultiplied RGBA lookup table
-   built from the color ramp. The raster becomes a `CGImage` and is drawn into
-   the tile (flipped, because MapKit's drawing context is y-down).
+   *plus a margin of one kernel radius*, so shapes are not clipped at tile
+   seams. Points are counted into a small `Float` raster.
+3. **Stamp.** A separable, peak-1 Gaussian (radius `kernelRadiusPixels` on
+   screen, sigma = radius / 2.5) is convolved over the raster. Because the
+   kernel peaks at 1, the result at any pixel is the number of *stacked photo
+   equivalents* there. Since the radius is fixed in screen pixels, photos taken
+   a few hundred metres apart chain into one shape at city zoom and merge into
+   one hot blob when zoomed out; this is what makes the map read like Google
+   Photos' rather than a field of dots.
+4. **Normalize.** With `.absolute` scaling (default), `t = (density / saturation) ^ gamma`:
+   a lone photo is a faint violet bump and `saturation` stacked photos are the
+   hottest colour, regardless of zoom. With `.relative` scaling (the Classic
+   preset), density is log-scaled against the densest blob anywhere in the data
+   at this zoom level (binned over all points at the quantized zoom, then the
+   2-D kernel evaluated at the 48 densest raw bins, cached per level).
+5. **Colorize + blit.** `t` indexes a 256-entry premultiplied RGBA lookup table.
+   Colour comes from the ramp; opacity is 0 below `alphaEdge` (crisp translucent
+   edge), `edgeAlpha` right at the edge and rises to `maxAlpha` by `alphaFull`.
+   The raster becomes a `CGImage` and is drawn into the tile (flipped, because
+   MapKit's drawing context is y-down).
 
 Because everything is drawn in map-point coordinates, the layer stays aligned
 while panning and zooming; MapKit re-requests tiles at each new zoom level.
@@ -62,19 +64,19 @@ while panning and zooming; MapKit re-requests tiles at each new zoom level.
 ### Tweaking the look
 
 The toolbar's **View** menu switches between three presets (Soft, Classic,
-Thermal) and an opacity level; both are remembered. The presets and every
-knob live in `Map/HeatMapStyle.swift`:
+Thermal), an opacity level, and can hide the layer; all are remembered. The
+presets and every knob live in `Map/HeatMapStyle.swift`:
 
 | Knob | Effect |
 | --- | --- |
-| `cellPixels` | Bin size on screen (Soft: 2 px). Smaller = sharper, more work per tile. |
-| `blurPixels` | Gaussian radius on screen (Soft: 8 px). Bigger = smoother, wider blobs. |
-| `scaling` | `.power` keeps gradient inside blobs (Google Photos look); `.log` flattens very skewed libraries. |
+| `kernelRadiusPixels` | Radius of one photo's bump on screen (Soft: 34 px). The main "how connected" knob: bigger joins photos that are farther apart. |
+| `cellPixels` | Raster bin size on screen (Soft: 2 px). Smaller = finer, more work per tile. |
+| `scaling` | `.absolute` (photo counts, zoom-independent) or `.relative` (to the hottest spot at this zoom). |
+| `saturation` | Absolute mode: stacked photos needed for the hottest colour (Soft: 10). Lower = more yellow. |
 | `gamma` | Exponent on the normalized density. < 1 brightens sparse areas, > 1 emphasises the densest clusters. |
-| `maxAlpha` | Opacity of the hottest color (scaled by the Opacity menu). |
-| `alphaFadeIn` | Fraction of the range over which the fringe fades from transparent. Small = crisp translucent edge. |
-| `minReference` | Floor for the normalization reference (blurred photo-count units). |
-| `ramp` | Color stops. `softRamp` (violet→magenta→orange→yellow) is the default; `classicRamp` and `thermalRamp` are alternatives. |
+| `alphaEdge` / `edgeAlpha` / `alphaFull` / `maxAlpha` | The opacity curve: where the edge cuts off, how translucent the halo is, and how fast it reaches full opacity. |
+| `minReference` | Relative mode: floor for the normalization reference. |
+| `ramp` | Colour stops. `softRamp` (violet→magenta→orange→yellow) is the default; `classicRamp` and `thermalRamp` are alternatives. |
 
 To add a preset, append a `HeatMapStyle` to `HeatMapStyle.presets`; it shows up
 in the menu automatically.
@@ -86,8 +88,15 @@ place to look is the flip at the end of `HeatMapRenderer.draw`.
 
 The **View** menu also picks the base map (Standard, Muted, Satellite, Hybrid)
 and the projection: *Flat*, or *Globe & Terrain* (MapKit's realistic elevation,
-which shows a 3-D globe when zoomed out). These are `MKMapConfiguration`s built
-in `Map/MapAppearance.swift` and persisted in UserDefaults.
+which shows a 3-D globe when zoomed far out and terrain when the map is tilted
+with the pitch control or Option-drag). These are `MKMapConfiguration`s built in
+`Map/MapAppearance.swift` and persisted in UserDefaults.
+
+MapKit forces the elevation style back to flat when any overlay is added at
+`.aboveLabels`, so the heat overlay is added at `.aboveRoads` and is limited to
+the data's bounding box. If the globe still does not appear, use View › Show
+Heat Layer to check whether the overlay is the cause, and try Hybrid, which is
+reported to keep the globe where Standard sometimes falls back to 2-D.
 
 On launch the map opens on your current area (about 40 km across) using a
 one-shot CoreLocation fix; your position is never drawn. If location access is

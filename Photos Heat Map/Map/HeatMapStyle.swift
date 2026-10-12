@@ -5,50 +5,60 @@
 //  Everything tweakable about how the heat layer looks. See README.md
 //  ("How the heat map works") for what each knob does.
 //
+//  The model, in short: every photo stamps a Gaussian bump (peak 1) with a
+//  radius fixed in *screen* pixels. Bumps add up, so the density at a pixel is
+//  the number of "stacked photo equivalents" there. That density is mapped to a
+//  colour and an opacity. Because the radius is fixed on screen, photos taken
+//  along a road chain into one connected shape at city zoom and merge into a
+//  single hot blob when zoomed out, like Google Photos' map.
+//
 
 import Foundation
 
 struct HeatMapStyle: Sendable, Equatable {
 
-    /// How blurred density maps onto the 0…1 color range.
     enum Scaling: String, Sendable, Equatable {
-        /// `(density / reference) ^ gamma`: keeps gradient inside blobs (Google Photos look).
-        case power
-        /// `log1p(density) / log1p(reference)`: flattens very skewed libraries.
-        case log
+        /// `(density / saturation) ^ gamma`: absolute photo counts. Lone photos are faint
+        /// violet, `saturation` stacked photos are the hottest colour, independent of zoom.
+        case absolute
+        /// `log1p(density) / log1p(densest blob at this zoom)`: everything is relative
+        /// to the hottest spot in your library at the current zoom level.
+        case relative
     }
 
-    /// Preset name shown in the Heat Style menu.
+    /// Preset name shown in the View › Heat Style menu.
     var name: String = "Soft"
 
-    /// Size of one density bin in *screen* pixels. Because it is fixed in pixels the
-    /// bin size in map units automatically adapts to the zoom level.
-    /// Smaller = sharper hot spots, more work per tile.
+    /// Size of one density bin in screen pixels. Smaller = finer raster, more work per tile.
     var cellPixels: Double = 2
 
-    /// Gaussian blur radius in screen pixels. Kernel radius in cells is
-    /// ceil(blurPixels / cellPixels); sigma is radius / 2.5.
-    var blurPixels: Double = 8
+    /// Radius of a single photo's bump, in screen pixels (sigma = radius / 2.5). This is
+    /// the knob that decides how far apart two photos can be and still join into one
+    /// shape. Fixed in pixels, so it adapts to zoom automatically.
+    var kernelRadiusPixels: Double = 34
 
-    /// Overall opacity of the layer (the Heat Style › Opacity menu scales this).
-    var maxAlpha: Double = 0.62
+    var scaling: Scaling = .absolute
 
-    /// Fraction of the normalized range over which alpha fades in from 0. Small values
-    /// give a crisp translucent edge (Google Photos); larger values dissolve the fringe.
-    var alphaFadeIn: Double = 0.07
+    /// Absolute scaling: how many stacked photos reach the hottest colour.
+    var saturation: Double = 10
 
-    var scaling: Scaling = .power
+    /// Exponent applied to the normalized density. < 1 brightens sparse areas.
+    var gamma: Double = 0.6
 
-    /// Exponent applied to the normalized density. < 1 brightens sparse areas,
-    /// > 1 emphasises the densest clusters.
-    var gamma: Double = 0.5
-
-    /// Minimum reference density (in blurred photo-count units). The reference is
-    /// normally the densest blob at the current zoom level; this floor stops a single
-    /// photo from being painted as the hottest spot in an otherwise empty library.
+    /// Relative scaling: floor for the reference density (stacked-photo units).
     var minReference: Double = 3
 
-    /// Color ramp from cool (t = 0) to hot (t = 1). Alpha is handled separately.
+    // Opacity curve, in normalized-density (t) space:
+    /// Below this t the layer is fully transparent, which gives blobs a crisp edge.
+    var alphaEdge: Double = 0.10
+    /// Opacity right at the edge (the translucent halo).
+    var edgeAlpha: Double = 0.22
+    /// t at which opacity reaches `maxAlpha`.
+    var alphaFull: Double = 0.50
+    /// Opacity of the core (scaled by the View › Heat Opacity menu).
+    var maxAlpha: Double = 0.62
+
+    /// Colour ramp from cool (t = 0) to hot (t = 1).
     var ramp: [RampStop] = HeatMapStyle.softRamp
 
     struct RampStop: Sendable, Equatable {
@@ -62,10 +72,10 @@ struct HeatMapStyle: Sendable, Equatable {
 
     /// Violet → magenta → salmon → orange → yellow, in the spirit of Google Photos.
     static let softRamp: [RampStop] = [
-        RampStop(t: 0.00, r: 0.42, g: 0.30, b: 0.95),
-        RampStop(t: 0.25, r: 0.70, g: 0.32, b: 0.92),
-        RampStop(t: 0.50, r: 0.96, g: 0.42, b: 0.62),
-        RampStop(t: 0.75, r: 1.00, g: 0.62, b: 0.25),
+        RampStop(t: 0.00, r: 0.45, g: 0.32, b: 0.95),
+        RampStop(t: 0.30, r: 0.72, g: 0.34, b: 0.92),
+        RampStop(t: 0.55, r: 0.97, g: 0.45, b: 0.60),
+        RampStop(t: 0.78, r: 1.00, g: 0.64, b: 0.25),
         RampStop(t: 1.00, r: 1.00, g: 0.93, b: 0.35),
     ]
 
@@ -92,11 +102,15 @@ struct HeatMapStyle: Sendable, Equatable {
 
     static let soft = HeatMapStyle()
 
-    static let classic = HeatMapStyle(name: "Classic", cellPixels: 3, blurPixels: 14, maxAlpha: 0.85,
-                                      alphaFadeIn: 0.15, scaling: .log, gamma: 0.8, ramp: classicRamp)
+    static let classic = HeatMapStyle(name: "Classic", cellPixels: 3, kernelRadiusPixels: 24,
+                                      scaling: .relative, gamma: 0.8,
+                                      alphaEdge: 0.02, edgeAlpha: 0.0, alphaFull: 0.25, maxAlpha: 0.85,
+                                      ramp: classicRamp)
 
-    static let thermal = HeatMapStyle(name: "Thermal", cellPixels: 2, blurPixels: 10, maxAlpha: 0.75,
-                                      alphaFadeIn: 0.12, scaling: .power, gamma: 0.55, ramp: thermalRamp)
+    static let thermal = HeatMapStyle(name: "Thermal", cellPixels: 2, kernelRadiusPixels: 30,
+                                      scaling: .absolute, saturation: 12, gamma: 0.6,
+                                      alphaEdge: 0.06, edgeAlpha: 0.15, alphaFull: 0.45, maxAlpha: 0.8,
+                                      ramp: thermalRamp)
 
     static let presets: [HeatMapStyle] = [soft, classic, thermal]
 
@@ -104,7 +118,7 @@ struct HeatMapStyle: Sendable, Equatable {
         presets.first { $0.name == name }
     }
 
-    // MARK: Color lookup
+    // MARK: Lookups
 
     func color(at t: Double) -> (r: Double, g: Double, b: Double) {
         let stops = ramp.sorted { $0.t < $1.t }
@@ -122,13 +136,21 @@ struct HeatMapStyle: Sendable, Equatable {
         return (last.r, last.g, last.b)
     }
 
+    func alpha(at t: Double) -> Double {
+        if t < alphaEdge { return 0 }
+        let span = max(alphaFull - alphaEdge, 1e-6)
+        let u = min(1, (t - alphaEdge) / span)
+        return edgeAlpha + (maxAlpha - edgeAlpha) * u
+    }
+
     /// 256-entry premultiplied RGBA lookup table (4 bytes per entry) used by the renderer.
     func makeLookupTable() -> [UInt8] {
         var lut = [UInt8](repeating: 0, count: 256 * 4)
         for i in 1..<256 {
             let t = Double(i) / 255
+            let a = alpha(at: t)
+            if a <= 0 { continue }
             let c = color(at: t)
-            let a = min(1, t / max(alphaFadeIn, 0.0001)) * maxAlpha
             lut[i * 4 + 0] = UInt8((c.r * a * 255).rounded())
             lut[i * 4 + 1] = UInt8((c.g * a * 255).rounded())
             lut[i * 4 + 2] = UInt8((c.b * a * 255).rounded())

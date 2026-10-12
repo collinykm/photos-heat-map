@@ -87,6 +87,7 @@ struct ContentView: View {
             index: model.heatIndex,
             style: model.heatStyle,
             appearance: model.mapAppearance,
+            showsHeatLayer: model.showsHeatLayer,
             fitRequest: model.fitRequest,
             onVisibleRectChange: { rect in model.mapVisibleRectChanged(rect) }
         )

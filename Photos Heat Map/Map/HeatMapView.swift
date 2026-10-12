@@ -23,6 +23,7 @@ struct HeatMapView: NSViewRepresentable {
     let index: SpatialIndex
     let style: HeatMapStyle
     let appearance: MapAppearance
+    let showsHeatLayer: Bool
     let fitRequest: MapFitRequest?
     let onVisibleRectChange: (MKMapRect) -> Void
 
@@ -39,11 +40,9 @@ struct HeatMapView: NSViewRepresentable {
         map.isPitchEnabled = true
         map.isRotateEnabled = true
 
-        let overlay = HeatMapOverlay()
-        let renderer = HeatMapRenderer(overlay: overlay, style: style)
-        context.coordinator.renderer = renderer
         context.coordinator.style = style
-        map.addOverlay(overlay, level: .aboveRoads)
+        context.coordinator.indexID = index.id
+        context.coordinator.installOverlay(on: map, index: index, style: style, visible: showsHeatLayer)
 
         map.postsFrameChangedNotifications = true
         context.coordinator.observeFrame(of: map)
@@ -56,11 +55,20 @@ struct HeatMapView: NSViewRepresentable {
 
         if coordinator.indexID != index.id {
             coordinator.indexID = index.id
-            coordinator.renderer?.update(index: index)
+            let wanted = HeatMapOverlay.paddedRect(for: index.boundingRect)
+            if let overlay = coordinator.overlay, MKMapRectEqualToRect(overlay.boundingMapRect, wanted) {
+                coordinator.renderer?.update(index: index)
+            } else {
+                // Bounding rect changed (album/filter switch): MapKit reads it once, so swap the overlay.
+                coordinator.installOverlay(on: map, index: index, style: style, visible: showsHeatLayer)
+            }
         }
         if coordinator.style != style {
             coordinator.style = style
             coordinator.renderer?.update(style: style)
+        }
+        if coordinator.isVisible != showsHeatLayer {
+            coordinator.setOverlayVisible(showsHeatLayer, on: map)
         }
         if coordinator.appearance != appearance {
             coordinator.appearance = appearance
@@ -81,7 +89,9 @@ struct HeatMapView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     final class Coordinator: NSObject, MKMapViewDelegate {
+        var overlay: HeatMapOverlay?
         var renderer: HeatMapRenderer?
+        var isVisible = false
         var indexID: UUID?
         var style: HeatMapStyle?
         var appearance: MapAppearance?
@@ -89,8 +99,33 @@ struct HeatMapView: NSViewRepresentable {
         var onVisibleRectChange: ((MKMapRect) -> Void)?
         private var frameObserver: NSObjectProtocol?
 
+        /// Creates (or replaces) the heat overlay + renderer for the given data.
+        func installOverlay(on map: MKMapView, index: SpatialIndex, style: HeatMapStyle, visible: Bool) {
+            if let old = overlay {
+                map.removeOverlay(old)
+            }
+            let newOverlay = HeatMapOverlay(boundingMapRect: HeatMapOverlay.paddedRect(for: index.boundingRect))
+            let newRenderer = HeatMapRenderer(overlay: newOverlay, style: style)
+            newRenderer.update(index: index)
+            overlay = newOverlay
+            renderer = newRenderer
+            isVisible = false
+            setOverlayVisible(visible, on: map)
+        }
+
+        func setOverlayVisible(_ visible: Bool, on map: MKMapView) {
+            guard let overlay, visible != isVisible else { return }
+            isVisible = visible
+            if visible {
+                // .aboveRoads (not .aboveLabels) is required to keep MapKit's 3-D elevation.
+                map.addOverlay(overlay, level: .aboveRoads)
+            } else {
+                map.removeOverlay(overlay)
+            }
+        }
+
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
-            if overlay is HeatMapOverlay, let renderer {
+            if let renderer, overlay === renderer.overlay {
                 return renderer
             }
             return MKOverlayRenderer(overlay: overlay)

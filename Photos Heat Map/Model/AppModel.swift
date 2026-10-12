@@ -50,6 +50,8 @@ final class AppModel {
     private(set) var heatPresetName: String = HeatMapStyle.soft.name
     private(set) var heatOpacity: Double = 1.0
     private(set) var mapAppearance: MapAppearance = .load()
+    /// Lets the user hide the heat layer (also handy to check map features without it).
+    var showsHeatLayer = true
     /// Visible part of the map, debounced so the grid is not re-queried 60× a second.
     private(set) var visibleMapRect: MKMapRect = .world
 
