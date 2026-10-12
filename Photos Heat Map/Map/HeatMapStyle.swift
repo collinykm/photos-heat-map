@@ -2,51 +2,37 @@
 //  HeatMapStyle.swift
 //  Photos Heat Map
 //
-//  Everything tweakable about how the heat layer looks. See README.md
-//  ("How the heat map works") for what each knob does.
+//  Everything tweakable about how the heat layer looks.
 //
-//  The model, in short: every photo stamps a Gaussian bump (peak 1) with a
-//  radius fixed in *screen* pixels. Bumps add up, so the density at a pixel is
-//  the number of "stacked photo equivalents" there. That density is mapped to a
-//  colour and an opacity. Because the radius is fixed on screen, photos taken
-//  along a road chain into one connected shape at city zoom and merge into a
-//  single hot blob when zoomed out, like Google Photos' map.
+//  The model: every photo stamps one radial bump (peak 1, Gaussian profile,
+//  support radius `stampRadiusPixels` on screen). Bumps add up, so the value
+//  at a pixel is the number of "stacked photo equivalents" there, independent
+//  of zoom. That value is mapped to a colour and an opacity. Because the stamp
+//  radius is fixed on screen, photos a few hundred metres apart join into one
+//  shape at city zoom and whole trips merge into one blob when zoomed out.
 //
 
 import Foundation
 
 struct HeatMapStyle: Sendable, Equatable {
 
-    enum Scaling: String, Sendable, Equatable {
-        /// `(density / saturation) ^ gamma`: absolute photo counts. Lone photos are faint
-        /// violet, `saturation` stacked photos are the hottest colour, independent of zoom.
-        case absolute
-        /// `log1p(density) / log1p(densest blob at this zoom)`: everything is relative
-        /// to the hottest spot in your library at the current zoom level.
-        case relative
-    }
-
     /// Preset name shown in the View › Heat Style menu.
     var name: String = "Soft"
 
-    /// Size of one density bin in screen pixels. Smaller = finer raster, more work per tile.
-    var cellPixels: Double = 2
+    /// Size of one raster bin in screen pixels. Smaller = finer, more work per tile.
+    var cellPixels: Double = 3
 
-    /// Radius of a single photo's bump, in screen pixels (sigma = radius / 2.5). This is
-    /// the knob that decides how far apart two photos can be and still join into one
-    /// shape. Fixed in pixels, so it adapts to zoom automatically.
-    var kernelRadiusPixels: Double = 34
+    /// Support radius of one photo's stamp, in screen pixels. The profile is Gaussian
+    /// with sigma = radius / 3.5, so a lone photo's visible halo is about half this and
+    /// the densest clusters grow to (but never past) this radius.
+    var stampRadiusPixels: Double = 42
 
-    var scaling: Scaling = .absolute
-
-    /// Absolute scaling: how many stacked photos reach the hottest colour.
+    /// How many stacked photos reach the hottest colour.
     var saturation: Double = 10
 
-    /// Exponent applied to the normalized density. < 1 brightens sparse areas.
+    /// Exponent on the normalized density (`t = (density / saturation) ^ gamma`).
+    /// < 1 brightens sparse areas, > 1 emphasises the densest clusters.
     var gamma: Double = 0.6
-
-    /// Relative scaling: floor for the reference density (stacked-photo units).
-    var minReference: Double = 3
 
     // Opacity curve, in normalized-density (t) space:
     /// Below this t the layer is fully transparent, which gives blobs a crisp edge.
@@ -102,13 +88,11 @@ struct HeatMapStyle: Sendable, Equatable {
 
     static let soft = HeatMapStyle()
 
-    static let classic = HeatMapStyle(name: "Classic", cellPixels: 3, kernelRadiusPixels: 24,
-                                      scaling: .relative, gamma: 0.8,
-                                      alphaEdge: 0.02, edgeAlpha: 0.0, alphaFull: 0.25, maxAlpha: 0.85,
+    static let classic = HeatMapStyle(name: "Classic", gamma: 0.7,
+                                      alphaEdge: 0.06, edgeAlpha: 0.0, alphaFull: 0.35, maxAlpha: 0.8,
                                       ramp: classicRamp)
 
-    static let thermal = HeatMapStyle(name: "Thermal", cellPixels: 2, kernelRadiusPixels: 30,
-                                      scaling: .absolute, saturation: 12, gamma: 0.6,
+    static let thermal = HeatMapStyle(name: "Thermal", saturation: 12,
                                       alphaEdge: 0.06, edgeAlpha: 0.15, alphaFull: 0.45, maxAlpha: 0.8,
                                       ramp: thermalRamp)
 

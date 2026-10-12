@@ -33,25 +33,26 @@ MapKit has no heat map, so `HeatMapRenderer` (an `MKOverlayRenderer` on an
 overlay that covers the data's bounding box) draws one tile at a time in
 `draw(_:zoomScale:in:)`, which MapKit calls on background threads:
 
-1. **Bins follow the zoom.** A bin is `cellPixels` wide *on screen*, so its size
-   in map points is `cellPixels / zoomScale`.
-2. **Gather.** The renderer asks `SpatialIndex` (all assets sorted by map-point
+1. **Bins follow the zoom.** A bin is `cellPixels` wide *on screen* (3 px), so
+   its size in map points is `cellPixels / zoomScale`.
+2. **Count.** The renderer asks `SpatialIndex` (all assets sorted by map-point
    x, binary-searched by x and filtered by y) for every point inside the tile
-   *plus a margin of one kernel radius*, so shapes are not clipped at tile
-   seams. Points are counted into a small `Float` raster.
-3. **Stamp.** A separable, peak-1 Gaussian (radius `kernelRadiusPixels` on
-   screen, sigma = radius / 2.5) is convolved over the raster. Because the
-   kernel peaks at 1, the result at any pixel is the number of *stacked photo
-   equivalents* there. Since the radius is fixed in screen pixels, photos taken
-   a few hundred metres apart chain into one shape at city zoom and merge into
-   one hot blob when zoomed out; this is what makes the map read like Google
-   Photos' rather than a field of dots.
-4. **Normalize.** With `.absolute` scaling (default), `t = (density / saturation) ^ gamma`:
-   a lone photo is a faint violet bump and `saturation` stacked photos are the
-   hottest colour, regardless of zoom. With `.relative` scaling (the Classic
-   preset), density is log-scaled against the densest blob anywhere in the data
-   at this zoom level (binned over all points at the quantized zoom, then the
-   2-D kernel evaluated at the 48 densest raw bins, cached per level).
+   *plus a margin of one stamp radius*, so shapes are not clipped at tile
+   seams, and counts them into a small raster.
+3. **Stamp.** Every non-empty bin adds `count ×` a radial bump: a 2-D lookup
+   table with a Gaussian profile (sigma = radius / 3.5) that reaches exactly
+   zero at `stampRadiusPixels` (42 px on screen). The result at any bin is the
+   number of *stacked photo equivalents* there. Two things follow from the
+   stamp being radial and fixed in screen pixels: a lone photo is a round
+   ~18 px halo, the densest cluster grows into a ~39 px circle and stops
+   (never a square, which is what a separable blur produces once it
+   saturates), and photos within ~50 px of each other on screen join into one
+   connected shape, so a road trip reads as a ribbon at city zoom and as one
+   blob when zoomed out.
+4. **Normalize.** `t = (density / saturation) ^ gamma` with `saturation` = 10
+   stacked photos and `gamma` = 0.6. This is absolute, not relative to the
+   hottest spot: a lone photo is faint violet at every zoom and ten stacked
+   photos are yellow at every zoom, exactly like Google Photos' map.
 5. **Colorize + blit.** `t` indexes a 256-entry premultiplied RGBA lookup table.
    Colour comes from the ramp; opacity is 0 below `alphaEdge` (crisp translucent
    edge), `edgeAlpha` right at the edge and rises to `maxAlpha` by `alphaFull`.
@@ -60,6 +61,8 @@ overlay that covers the data's bounding box) draws one tile at a time in
 
 Because everything is drawn in map-point coordinates, the layer stays aligned
 while panning and zooming; MapKit re-requests tiles at each new zoom level.
+Cost per tile is (non-empty bins) × (stamp table size ≈ 29×29), a few
+milliseconds even when every bin is occupied.
 
 ### Tweaking the look
 
@@ -69,13 +72,11 @@ presets and every knob live in `Map/HeatMapStyle.swift`:
 
 | Knob | Effect |
 | --- | --- |
-| `kernelRadiusPixels` | Radius of one photo's bump on screen (Soft: 34 px). The main "how connected" knob: bigger joins photos that are farther apart. |
-| `cellPixels` | Raster bin size on screen (Soft: 2 px). Smaller = finer, more work per tile. |
-| `scaling` | `.absolute` (photo counts, zoom-independent) or `.relative` (to the hottest spot at this zoom). |
-| `saturation` | Absolute mode: stacked photos needed for the hottest colour (Soft: 10). Lower = more yellow. |
+| `stampRadiusPixels` | Support radius of one photo's bump on screen (42 px). The "how connected" knob: a lone photo's halo is about half this, clusters grow to all of it. |
+| `saturation` | Stacked photos needed for the hottest colour (10). Lower = more yellow. |
 | `gamma` | Exponent on the normalized density. < 1 brightens sparse areas, > 1 emphasises the densest clusters. |
+| `cellPixels` | Raster bin size on screen (3 px). Smaller = finer, more work per tile. |
 | `alphaEdge` / `edgeAlpha` / `alphaFull` / `maxAlpha` | The opacity curve: where the edge cuts off, how translucent the halo is, and how fast it reaches full opacity. |
-| `minReference` | Relative mode: floor for the normalization reference. |
 | `ramp` | Colour stops. `softRamp` (violet→magenta→orange→yellow) is the default; `classicRamp` and `thermalRamp` are alternatives. |
 
 To add a preset, append a `HeatMapStyle` to `HeatMapStyle.presets`; it shows up
