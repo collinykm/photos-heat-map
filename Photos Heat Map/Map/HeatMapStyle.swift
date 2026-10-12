@@ -22,23 +22,25 @@ struct HeatMapStyle: Sendable, Equatable {
     /// Size of one raster bin in screen pixels. Smaller = finer, more work per tile.
     var cellPixels: Double = 3
 
-    /// Support radius of one photo's stamp, in screen pixels. The profile is Gaussian
-    /// with sigma = radius / 3.5, so a lone photo's visible halo is about half this and
-    /// the densest clusters grow to (but never past) this radius.
-    var stampRadiusPixels: Double = 42
+    /// Support radius of one photo's stamp, in screen points. The profile is Gaussian
+    /// with sigma = radius / 3.5: a lone photo's visible halo is ~9 pt, the densest
+    /// clusters grow to ~21 pt and stop, and photos within ~22 pt of each other on
+    /// screen join into one shape.
+    var stampRadiusPixels: Double = 24
 
-    /// How many stacked photos reach the hottest colour.
-    var saturation: Double = 10
+    /// How many stacked photos reach the hottest colour. The mapping is logarithmic,
+    /// `t = log(1 + density) / log(1 + saturation)`, so with 300: 1 photo is faint
+    /// violet, 10 pink, 30 orange, 300+ yellow, at every zoom level.
+    var saturation: Double = 300
 
-    /// Exponent on the normalized density (`t = (density / saturation) ^ gamma`).
-    /// < 1 brightens sparse areas, > 1 emphasises the densest clusters.
-    var gamma: Double = 0.6
+    /// Extra exponent on t. < 1 brightens sparse areas, > 1 emphasises dense clusters.
+    var gamma: Double = 1.0
 
     // Opacity curve, in normalized-density (t) space:
     /// Below this t the layer is fully transparent, which gives blobs a crisp edge.
-    var alphaEdge: Double = 0.10
+    var alphaEdge: Double = 0.06
     /// Opacity right at the edge (the translucent halo).
-    var edgeAlpha: Double = 0.22
+    var edgeAlpha: Double = 0.20
     /// t at which opacity reaches `maxAlpha`.
     var alphaFull: Double = 0.50
     /// Opacity of the core (scaled by the View › Heat Opacity menu).
@@ -88,12 +90,12 @@ struct HeatMapStyle: Sendable, Equatable {
 
     static let soft = HeatMapStyle()
 
-    static let classic = HeatMapStyle(name: "Classic", gamma: 0.7,
-                                      alphaEdge: 0.06, edgeAlpha: 0.0, alphaFull: 0.35, maxAlpha: 0.8,
+    static let classic = HeatMapStyle(name: "Classic",
+                                      alphaEdge: 0.04, edgeAlpha: 0.0, alphaFull: 0.35, maxAlpha: 0.8,
                                       ramp: classicRamp)
 
-    static let thermal = HeatMapStyle(name: "Thermal", saturation: 12,
-                                      alphaEdge: 0.06, edgeAlpha: 0.15, alphaFull: 0.45, maxAlpha: 0.8,
+    static let thermal = HeatMapStyle(name: "Thermal",
+                                      alphaEdge: 0.05, edgeAlpha: 0.15, alphaFull: 0.45, maxAlpha: 0.8,
                                       ramp: thermalRamp)
 
     static let presets: [HeatMapStyle] = [soft, classic, thermal]

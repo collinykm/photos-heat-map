@@ -12,8 +12,8 @@
 //    3. For every non-empty bin, add count × a radial bump (2-D lookup table,
 //       Gaussian profile, zero at `stampRadiusPixels`). The result is the
 //       number of stacked photo equivalents at each bin.
-//    4. Map density through (density / saturation) ^ gamma and the colour /
-//       opacity lookup table; blit the RGBA raster into the tile.
+//    4. Map density through log(1 + density) / log(1 + saturation) and the
+//       colour / opacity lookup table; blit the RGBA raster into the tile.
 //
 //  Because the renderer draws in map-point space, the result stays aligned
 //  while panning and zooming; MapKit re-tiles when the zoom level changes.
@@ -201,8 +201,8 @@ final class HeatMapRenderer: MKOverlayRenderer {
             }
         }
 
-        // 4. Normalize + colorize.
-        let saturation = max(style.saturation, 0.001)
+        // 4. Normalize (log, so 1 photo and 300 stacked photos both stay visible) + colorize.
+        let logSaturation = log1p(max(style.saturation, 1))
         let gamma = style.gamma
         var pixels = [UInt8](repeating: 0, count: cols * rows * 4)
         pixels.withUnsafeMutableBufferPointer { px in
@@ -210,7 +210,7 @@ final class HeatMapRenderer: MKOverlayRenderer {
                 for i in 0..<(cols * rows) {
                     let v = density[i]
                     if v <= 0 { continue }
-                    var t = Double(v) / saturation
+                    var t = log1p(Double(v)) / logSaturation
                     if t > 1 { t = 1 }
                     if gamma != 1 { t = pow(t, gamma) }
                     let li = Int(t * 255 + 0.5) * 4

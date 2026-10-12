@@ -41,18 +41,18 @@ overlay that covers the data's bounding box) draws one tile at a time in
    seams, and counts them into a small raster.
 3. **Stamp.** Every non-empty bin adds `count ×` a radial bump: a 2-D lookup
    table with a Gaussian profile (sigma = radius / 3.5) that reaches exactly
-   zero at `stampRadiusPixels` (42 px on screen). The result at any bin is the
-   number of *stacked photo equivalents* there. Two things follow from the
-   stamp being radial and fixed in screen pixels: a lone photo is a round
-   ~18 px halo, the densest cluster grows into a ~39 px circle and stops
-   (never a square, which is what a separable blur produces once it
-   saturates), and photos within ~50 px of each other on screen join into one
-   connected shape, so a road trip reads as a ribbon at city zoom and as one
-   blob when zoomed out.
-4. **Normalize.** `t = (density / saturation) ^ gamma` with `saturation` = 10
-   stacked photos and `gamma` = 0.6. This is absolute, not relative to the
-   hottest spot: a lone photo is faint violet at every zoom and ten stacked
-   photos are yellow at every zoom, exactly like Google Photos' map.
+   zero at `stampRadiusPixels` (24 pt on screen). The result at any bin is the
+   number of *stacked photo equivalents* there. Because the stamp is radial and
+   fixed in screen points: a lone photo is a round ~9 pt halo, the densest
+   cluster grows into a ~21 pt circle and stops (never a square, which is what
+   a separable blur produces once it saturates), and photos within ~22 pt of
+   each other on screen join into one connected shape, so a road trip reads as
+   a ribbon at city zoom and as one blob when zoomed out.
+4. **Normalize.** `t = log(1 + density) / log(1 + saturation)` with
+   `saturation` = 300. The log keeps the whole range readable at every zoom:
+   1 photo is faint violet, 10 pink, 30 orange, 300+ yellow, whether that is a
+   lone shot at street level or a whole city seen from orbit. (A linear mapping
+   clips every city to the top colour at continent zoom.)
 5. **Colorize + blit.** `t` indexes a 256-entry premultiplied RGBA lookup table.
    Colour comes from the ramp; opacity is 0 below `alphaEdge` (crisp translucent
    edge), `edgeAlpha` right at the edge and rises to `maxAlpha` by `alphaFull`.
@@ -72,9 +72,9 @@ presets and every knob live in `Map/HeatMapStyle.swift`:
 
 | Knob | Effect |
 | --- | --- |
-| `stampRadiusPixels` | Support radius of one photo's bump on screen (42 px). The "how connected" knob: a lone photo's halo is about half this, clusters grow to all of it. |
-| `saturation` | Stacked photos needed for the hottest colour (10). Lower = more yellow. |
-| `gamma` | Exponent on the normalized density. < 1 brightens sparse areas, > 1 emphasises the densest clusters. |
+| `stampRadiusPixels` | Support radius of one photo's bump on screen (24 pt). The "how big / how connected" knob: a lone photo's halo is ~40 % of this, clusters grow to ~90 % of it. |
+| `saturation` | Stacked photos needed for the hottest colour (300, log scale). Lower = more yellow. |
+| `gamma` | Extra exponent on t (1.0). < 1 brightens sparse areas, > 1 emphasises the densest clusters. |
 | `cellPixels` | Raster bin size on screen (3 px). Smaller = finer, more work per tile. |
 | `alphaEdge` / `edgeAlpha` / `alphaFull` / `maxAlpha` | The opacity curve: where the edge cuts off, how translucent the halo is, and how fast it reaches full opacity. |
 | `ramp` | Colour stops. `softRamp` (violet→magenta→orange→yellow) is the default; `classicRamp` and `thermalRamp` are alternatives. |
