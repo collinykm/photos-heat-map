@@ -42,8 +42,16 @@ struct ContentView: View {
         }
     }
 
-    // Stage 2: full-window heat map. Stage 3 adds the split view + grid.
     private var readyContent: some View {
+        HSplitView {
+            mapSection
+                .frame(minWidth: 340, idealWidth: 760, maxWidth: .infinity, maxHeight: .infinity)
+            PhotoGridView()
+                .frame(minWidth: 280, idealWidth: 440, maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private var mapSection: some View {
         HeatMapView(
             index: model.heatIndex,
             style: model.heatStyle,
