@@ -16,6 +16,8 @@ struct PhotoGridView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            FilterBar()
+            Divider()
             header
             Divider()
             ScrollViewReader { proxy in

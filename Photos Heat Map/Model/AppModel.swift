@@ -55,6 +55,13 @@ final class AppModel {
     static let pageSize = 50
     static let pageDays = 7
 
+    // MARK: Filters
+
+    private(set) var filters = PhotoFilters()
+    /// When true the heat map shows only the filtered assets; when false the filters
+    /// only narrow the grid and the map shows the whole selection.
+    private(set) var filtersAffectMap = true
+
     @ObservationIgnored private let indexer = PhotoLibraryIndexer()
     @ObservationIgnored private var scanTask: Task<Void, Never>?
     @ObservationIgnored private var indexTask: Task<Void, Never>?
@@ -72,8 +79,28 @@ final class AppModel {
     var imageCount: Int { allAssets.reduce(0) { $0 + ($1.kind == .image ? 1 : 0) } }
     var videoCount: Int { allAssets.count - imageCount }
 
-    /// Assets after album and filter selection. Later stages narrow this down.
-    var filteredAssets: [GeoAsset] { allAssets }
+    /// Applies the current album/filter selection to a list of assets. Static and
+    /// nonisolated so it can run inside detached tasks.
+    nonisolated static func applySelection(_ assets: [GeoAsset], filters: PhotoFilters) -> [GeoAsset] {
+        if filters.isDefault { return assets }
+        return assets.filter { filters.matches($0) }
+    }
+
+    func updateFilters(_ newFilters: PhotoFilters) {
+        guard newFilters != filters else { return }
+        filters = newFilters
+        if filtersAffectMap {
+            rebuildIndex(fitMap: false)
+        } else {
+            requeryVisible()
+        }
+    }
+
+    func setFiltersAffectMap(_ value: Bool) {
+        guard value != filtersAffectMap else { return }
+        filtersAffectMap = value
+        rebuildIndex(fitMap: false)
+    }
 
     // MARK: - Loading
 
@@ -113,15 +140,16 @@ final class AppModel {
 
     // MARK: - Heat index
 
-    /// Rebuilds the spatial index from `filteredAssets` off the main thread.
+    /// Rebuilds the spatial index from the current selection off the main thread.
     func rebuildIndex(fitMap: Bool) {
         indexTask?.cancel()
         indexGeneration += 1
         let generation = indexGeneration
-        let assets = filteredAssets
+        let assets = allAssets
+        let mapFilters = filtersAffectMap ? filters : PhotoFilters()
         indexTask = Task {
             let built = await Task.detached(priority: .userInitiated) {
-                SpatialIndex(assets: assets)
+                SpatialIndex(assets: Self.applySelection(assets, filters: mapFilters))
             }.value
             guard !Task.isCancelled, generation == self.indexGeneration else { return }
             self.heatIndex = built
@@ -175,11 +203,14 @@ extension AppModel {
         let generation = queryGeneration
         let index = heatIndex
         let rect = visibleMapRect
+        let filters = self.filters
         isQuerying = true
 
         queryTask = Task {
             let sorted: [GeoAsset] = await Task.detached(priority: .userInitiated) {
-                var found = index.assets(in: rect)
+                // The index may already be filtered (filtersAffectMap); applying the
+                // filters again is cheap and keeps the grid correct either way.
+                var found = Self.applySelection(index.assets(in: rect), filters: filters)
                 found.sort { a, b in
                     let da = a.sortDate, db = b.sortDate
                     if da != db { return da > db }
