@@ -43,12 +43,28 @@ struct ContentView: View {
     }
 
     private var readyContent: some View {
-        HSplitView {
-            mapSection
-                .frame(minWidth: 340, idealWidth: 760, maxWidth: .infinity, maxHeight: .infinity)
-            PhotoGridView()
-                .frame(minWidth: 280, idealWidth: 440, maxWidth: .infinity, maxHeight: .infinity)
+        ZStack {
+            HSplitView {
+                mapSection
+                    .frame(minWidth: 340, idealWidth: 760, maxWidth: .infinity, maxHeight: .infinity)
+                PhotoGridView()
+                    .frame(minWidth: 280, idealWidth: 440, maxWidth: .infinity, maxHeight: .infinity)
+            }
+            if let selected = model.selectedAsset {
+                PhotoDetailView(asset: selected)
+                    .transition(.opacity)
+            }
         }
+        .animation(.easeInOut(duration: 0.15), value: model.selectedAssetID == nil)
+        .alert("Photos", isPresented: errorBinding) {
+            Button("OK") { model.errorMessage = nil }
+        } message: {
+            Text(model.errorMessage ?? "")
+        }
+    }
+
+    private var errorBinding: Binding<Bool> {
+        Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })
     }
 
     private var mapSection: some View {

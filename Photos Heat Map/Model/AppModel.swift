@@ -52,6 +52,11 @@ final class AppModel {
     private(set) var isQuerying = false
     var selectedAssetID: String?
 
+    /// Regular user albums (for "Add to Album").
+    private(set) var userAlbums: [AlbumInfo] = []
+    /// Last error from a Photos write, shown in an alert.
+    var errorMessage: String?
+
     static let pageSize = 50
     static let pageDays = 7
 
@@ -70,6 +75,9 @@ final class AppModel {
     @ObservationIgnored private var latestMapRect: MKMapRect = .world
     @ObservationIgnored private var queryTask: Task<Void, Never>?
     @ObservationIgnored private var queryGeneration = 0
+    @ObservationIgnored private var changeObserver: LibraryChangeObserver?
+    /// Where the selection should land after the selected item disappears.
+    @ObservationIgnored private var pendingSelectionIndex: Int?
 
     var isScanning: Bool {
         if case .scanning = phase { return true }
@@ -136,12 +144,16 @@ final class AppModel {
         allAssets = assets
         phase = .ready
         rebuildIndex(fitMap: true)
+        userAlbums = await indexer.fetchUserAlbums()
+        installChangeObserver()
     }
 
     // MARK: - Heat index
 
     /// Rebuilds the spatial index from the current selection off the main thread.
-    func rebuildIndex(fitMap: Bool) {
+    /// `resetPage` = false keeps the grid's current page/scroll position (used for
+    /// in-place library changes such as favorites or deletions).
+    func rebuildIndex(fitMap: Bool, resetPage: Bool = true) {
         indexTask?.cancel()
         indexGeneration += 1
         let generation = indexGeneration
@@ -156,7 +168,7 @@ final class AppModel {
             if fitMap, !built.isEmpty {
                 self.fitRequest = MapFitRequest(rect: built.rectContaining(fraction: 0.96), animated: false)
             }
-            self.requeryVisible()
+            self.requeryVisible(resetPage: resetPage)
         }
     }
 
@@ -196,14 +208,16 @@ extension AppModel {
     }
 
     /// Re-runs the visible-region query against the current index (off the main thread),
-    /// then resets the grid to its first page.
-    func requeryVisible() {
+    /// then resets the grid to its first page (or keeps the current page size when
+    /// `resetPage` is false).
+    func requeryVisible(resetPage: Bool = true) {
         queryTask?.cancel()
         queryGeneration += 1
         let generation = queryGeneration
         let index = heatIndex
         let rect = visibleMapRect
         let filters = self.filters
+        let keepCount = resetPage ? 0 : displayedAssets.count
         isQuerying = true
 
         queryTask = Task {
@@ -220,15 +234,16 @@ extension AppModel {
             }.value
             guard !Task.isCancelled, generation == self.queryGeneration else { return }
 
-            let end = Self.pageEnd(in: sorted, from: 0)
+            let end = max(Self.pageEnd(in: sorted, from: 0), min(keepCount, sorted.count))
             let page = Array(sorted.prefix(end))
             _ = await ThumbnailProvider.shared.resolveAssets(page.map(\.id))
             guard !Task.isCancelled, generation == self.queryGeneration else { return }
 
             self.visibleAssets = sorted
             self.displayedAssets = page
-            self.pageGeneration += 1
+            if resetPage { self.pageGeneration += 1 }
             self.isQuerying = false
+            self.fixUpSelection()
         }
     }
 
@@ -250,5 +265,191 @@ extension AppModel {
 
     func select(_ asset: GeoAsset) {
         selectedAssetID = asset.id
+    }
+}
+
+// MARK: - Selection
+
+extension AppModel {
+
+    var selectedIndex: Int? {
+        guard let selectedAssetID else { return nil }
+        return displayedAssets.firstIndex { $0.id == selectedAssetID }
+    }
+
+    var selectedAsset: GeoAsset? {
+        selectedIndex.map { displayedAssets[$0] }
+    }
+
+    var hasPrevious: Bool { (selectedIndex ?? 0) > 0 }
+
+    var hasNext: Bool {
+        guard let selectedIndex else { return false }
+        return selectedIndex + 1 < displayedAssets.count
+    }
+
+    func selectNext() {
+        guard let selectedIndex, selectedIndex + 1 < displayedAssets.count else { return }
+        selectedAssetID = displayedAssets[selectedIndex + 1].id
+    }
+
+    func selectPrevious() {
+        guard let selectedIndex, selectedIndex > 0 else { return }
+        selectedAssetID = displayedAssets[selectedIndex - 1].id
+    }
+
+    func closeDetail() {
+        selectedAssetID = nil
+        pendingSelectionIndex = nil
+    }
+
+    /// After the grid changed underneath the viewer, keep the viewer on a valid item.
+    private func fixUpSelection() {
+        guard selectedAssetID != nil, selectedIndex == nil else {
+            pendingSelectionIndex = nil
+            return
+        }
+        guard let wanted = pendingSelectionIndex, !displayedAssets.isEmpty else {
+            selectedAssetID = nil
+            pendingSelectionIndex = nil
+            return
+        }
+        selectedAssetID = displayedAssets[min(wanted, displayedAssets.count - 1)].id
+        pendingSelectionIndex = nil
+    }
+}
+
+// MARK: - Library writes
+
+extension AppModel {
+
+    private func resolvePHAsset(_ id: String) async -> PHAsset? {
+        if let cached = ThumbnailProvider.shared.cachedAsset(for: id) { return cached }
+        let resolved = await ThumbnailProvider.shared.resolveAssets([id])
+        if resolved[id] == nil { errorMessage = PhotoLibraryActionError.assetNotFound.localizedDescription }
+        return resolved[id]
+    }
+
+    private func report(_ error: Error) {
+        guard !PhotoLibraryActions.isUserCancellation(error) else { return }
+        errorMessage = error.localizedDescription
+    }
+
+    /// Replaces one asset in every array that holds it (favorite flag changes).
+    private func replaceAsset(_ updated: GeoAsset) {
+        if let i = allAssets.firstIndex(where: { $0.id == updated.id }) { allAssets[i] = updated }
+        if let i = visibleAssets.firstIndex(where: { $0.id == updated.id }) { visibleAssets[i] = updated }
+        if let i = displayedAssets.firstIndex(where: { $0.id == updated.id }) { displayedAssets[i] = updated }
+    }
+
+    func toggleFavorite(_ asset: GeoAsset) async {
+        guard let phAsset = await resolvePHAsset(asset.id) else { return }
+        let newValue = !asset.isFavorite
+        do {
+            try await PhotoLibraryActions.setFavorite(phAsset, newValue)
+            replaceAsset(asset.withFavorite(newValue))
+            // The spatial index holds copies; refresh it without disturbing the grid.
+            rebuildIndex(fitMap: false, resetPage: false)
+        } catch {
+            report(error)
+        }
+    }
+
+    func deleteAsset(_ asset: GeoAsset) async {
+        guard let phAsset = await resolvePHAsset(asset.id) else { return }
+        do {
+            try await PhotoLibraryActions.delete(phAsset)
+            apply(LibraryDelta(removedIDs: [asset.id]))
+        } catch {
+            report(error)
+        }
+    }
+
+    func add(_ asset: GeoAsset, to album: AlbumInfo) async {
+        guard let phAsset = await resolvePHAsset(asset.id) else { return }
+        do {
+            try await PhotoLibraryActions.add(phAsset, toAlbumWithID: album.id)
+        } catch {
+            report(error)
+        }
+    }
+
+    func createAlbum(titled title: String, adding asset: GeoAsset) async {
+        guard let phAsset = await resolvePHAsset(asset.id) else { return }
+        do {
+            try await PhotoLibraryActions.createAlbum(titled: title, adding: phAsset)
+            userAlbums = await indexer.fetchUserAlbums()
+        } catch {
+            report(error)
+        }
+    }
+}
+
+// MARK: - Library change notifications
+
+extension AppModel {
+
+    private func installChangeObserver() {
+        guard changeObserver == nil else { return }
+        let observer = LibraryChangeObserver { [weak self] box in
+            Task { @MainActor in
+                await self?.handleLibraryChange(box)
+            }
+        }
+        observer.register()
+        changeObserver = observer
+    }
+
+    private func handleLibraryChange(_ box: SendableBox<PHChange>) async {
+        guard phase == .ready else { return }
+        let delta = await indexer.applyChange(box)
+        apply(delta)
+    }
+
+    /// Applies a delta to the in-memory asset list and refreshes the map/grid without
+    /// losing the user's place in the grid.
+    func apply(_ delta: LibraryDelta) {
+        if delta.needsFullRescan {
+            reload()
+            return
+        }
+        if delta.albumListChanged {
+            Task { self.userAlbums = await self.indexer.fetchUserAlbums() }
+        }
+
+        var didChange = false
+        if !delta.removedIDs.isEmpty || !delta.upserted.isEmpty {
+            let removed = Set(delta.removedIDs)
+            var upserts = Dictionary(delta.upserted.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
+            var next: [GeoAsset] = []
+            next.reserveCapacity(allAssets.count + upserts.count)
+            for asset in allAssets {
+                if removed.contains(asset.id) {
+                    didChange = true
+                    continue
+                }
+                if let updated = upserts.removeValue(forKey: asset.id) {
+                    if updated != asset { didChange = true }
+                    next.append(updated)
+                } else {
+                    next.append(asset)
+                }
+            }
+            if !upserts.isEmpty {
+                didChange = true
+                next.append(contentsOf: upserts.values)
+            }
+            if didChange {
+                if let selected = selectedAssetID, removed.contains(selected) {
+                    pendingSelectionIndex = selectedIndex
+                }
+                allAssets = next
+            }
+            ThumbnailProvider.shared.invalidate(ids: delta.changedIDs + delta.removedIDs)
+        }
+
+        if didChange || delta.selectedAlbumChanged {
+            rebuildIndex(fitMap: false, resetPage: false)
+        }
     }
 }

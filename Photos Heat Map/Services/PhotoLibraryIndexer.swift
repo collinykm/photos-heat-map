@@ -21,6 +21,10 @@ actor PhotoLibraryIndexer {
     /// Fetch result for the whole library (images + videos). Kept so library change
     /// notifications can later be diffed against it.
     private(set) var libraryFetchResult: PHFetchResult<PHAsset>?
+    /// Fetch result of the currently selected album's assets (nil = whole library).
+    private var albumFetchResult: PHFetchResult<PHAsset>?
+    /// Fetch result of the user's regular albums, for the "Add to Album" menu.
+    private var userAlbumsFetchResult: PHFetchResult<PHAssetCollection>?
 
     static func allMediaFetchOptions() -> PHFetchOptions {
         let options = PHFetchOptions()
@@ -62,5 +66,66 @@ actor PhotoLibraryIndexer {
         }
         progress(ScanProgress(scanned: total, total: total, found: found.count))
         return found
+    }
+
+    // MARK: - Albums
+
+    /// Regular user albums that accept new content, sorted by title.
+    func fetchUserAlbums() -> [AlbumInfo] {
+        let result = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumRegular, options: nil)
+        userAlbumsFetchResult = result
+        var albums: [AlbumInfo] = []
+        result.enumerateObjects { collection, _, _ in
+            guard collection.canPerform(.addContent) else { return }
+            albums.append(AlbumInfo(id: collection.localIdentifier,
+                                    title: collection.localizedTitle ?? "Untitled",
+                                    kind: .user,
+                                    count: nil,
+                                    canAddContent: true))
+        }
+        return albums.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
+
+    // MARK: - Change handling
+
+    /// Diffs a PhotoKit change against the fetch results we hold and describes it in
+    /// terms of GeoAssets. Runs on the actor, never on the main thread.
+    func applyChange(_ box: SendableBox<PHChange>) -> LibraryDelta {
+        let change = box.value
+        var delta = LibraryDelta()
+
+        if let result = libraryFetchResult, let details = change.changeDetails(for: result) {
+            libraryFetchResult = details.fetchResultAfterChanges
+            if details.hasIncrementalChanges {
+                for asset in details.removedObjects {
+                    delta.removedIDs.append(asset.localIdentifier)
+                }
+                for asset in details.insertedObjects {
+                    if let geo = GeoAsset(asset: asset) { delta.upserted.append(geo) }
+                }
+                for asset in details.changedObjects {
+                    delta.changedIDs.append(asset.localIdentifier)
+                    if let geo = GeoAsset(asset: asset) {
+                        delta.upserted.append(geo)
+                    } else {
+                        delta.removedIDs.append(asset.localIdentifier)
+                    }
+                }
+            } else {
+                delta.needsFullRescan = true
+            }
+        }
+
+        if let albumResult = albumFetchResult, let details = change.changeDetails(for: albumResult) {
+            albumFetchResult = details.fetchResultAfterChanges
+            delta.selectedAlbumChanged = true
+        }
+
+        if let albumsResult = userAlbumsFetchResult, let details = change.changeDetails(for: albumsResult) {
+            userAlbumsFetchResult = details.fetchResultAfterChanges
+            delta.albumListChanged = true
+        }
+
+        return delta
     }
 }

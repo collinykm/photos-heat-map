@@ -76,6 +76,21 @@ struct ThumbnailCell: View {
     private func load() {
         guard image == nil, requestID == nil else { return }
         let id = asset.id
+        if ThumbnailProvider.shared.cachedAsset(for: id) != nil {
+            startRequest(id: id)
+        } else {
+            // The page was resolved before it was shown, but the PHAsset cache is bounded;
+            // re-resolve this one and try again.
+            Task {
+                _ = await ThumbnailProvider.shared.resolveAssets([id])
+                if asset.id == id, image == nil, requestID == nil {
+                    startRequest(id: id)
+                }
+            }
+        }
+    }
+
+    private func startRequest(id: String) {
         requestID = ThumbnailProvider.shared.requestThumbnail(id: id, targetSize: targetSize) { result, degraded in
             Task { @MainActor in
                 guard let result else { return }
