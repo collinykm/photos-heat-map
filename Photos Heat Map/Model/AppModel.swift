@@ -11,6 +11,13 @@ import Observation
 import Photos
 import MapKit
 
+/// Paging rule for the grid: a page is at least `pageSize` items, or everything
+/// within `pageDays` of the first item in the page, whichever is more.
+enum GridPaging {
+    static let pageSize = 50
+    static let pageDays = 7
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -54,11 +61,17 @@ final class AppModel {
 
     /// Regular user albums (for "Add to Album").
     private(set) var userAlbums: [AlbumInfo] = []
+
+    // MARK: Album / library selection
+
+    /// Everything the album picker offers (whole library first).
+    private(set) var albums: [AlbumInfo] = [.entireLibrary]
+    private(set) var selectedAlbum: AlbumInfo = .entireLibrary
+    private(set) var isLoadingAlbum = false
+    /// Identifiers of the assets in `selectedAlbum`; nil means the whole library.
+    @ObservationIgnored private var albumAssetIDs: Set<String>?
     /// Last error from a Photos write, shown in an alert.
     var errorMessage: String?
-
-    static let pageSize = 50
-    static let pageDays = 7
 
     // MARK: Filters
 
@@ -89,9 +102,13 @@ final class AppModel {
 
     /// Applies the current album/filter selection to a list of assets. Static and
     /// nonisolated so it can run inside detached tasks.
-    nonisolated static func applySelection(_ assets: [GeoAsset], filters: PhotoFilters) -> [GeoAsset] {
-        if filters.isDefault { return assets }
-        return assets.filter { filters.matches($0) }
+    nonisolated static func applySelection(_ assets: [GeoAsset], filters: PhotoFilters,
+                                           albumIDs: Set<String>? = nil) -> [GeoAsset] {
+        if filters.isDefault && albumIDs == nil { return assets }
+        return assets.filter { asset in
+            if let albumIDs, !albumIDs.contains(asset.id) { return false }
+            return filters.matches(asset)
+        }
     }
 
     func updateFilters(_ newFilters: PhotoFilters) {
@@ -143,9 +160,41 @@ final class AppModel {
         }
         allAssets = assets
         phase = .ready
+        // A rescan keeps the selected album; re-read its membership first.
+        if !selectedAlbum.isEntireLibrary {
+            albumAssetIDs = await indexer.albumMembership(albumID: selectedAlbum.id)
+        }
         rebuildIndex(fitMap: true)
-        userAlbums = await indexer.fetchUserAlbums()
         installChangeObserver()
+        userAlbums = await indexer.fetchUserAlbums()
+        albums = await indexer.fetchAllAlbums()
+        if !albums.contains(selectedAlbum) {
+            selectedAlbum = .entireLibrary
+            albumAssetIDs = nil
+            rebuildIndex(fitMap: false)
+        }
+    }
+
+    // MARK: - Album selection
+
+    func selectAlbum(_ album: AlbumInfo) async {
+        guard album != selectedAlbum else { return }
+        selectedAlbum = album
+        isLoadingAlbum = true
+        albumAssetIDs = await indexer.albumMembership(albumID: album.isEntireLibrary ? nil : album.id)
+        guard selectedAlbum == album else { return }   // user picked another album meanwhile
+        isLoadingAlbum = false
+        rebuildIndex(fitMap: true)
+    }
+
+    /// Re-reads the selected album's membership after Photos reported a change to it.
+    private func refreshSelectedAlbum() async {
+        guard !selectedAlbum.isEntireLibrary else { return }
+        let album = selectedAlbum
+        let ids = await indexer.albumMembership(albumID: album.id)
+        guard selectedAlbum == album else { return }
+        albumAssetIDs = ids
+        rebuildIndex(fitMap: false, resetPage: false)
     }
 
     // MARK: - Heat index
@@ -159,9 +208,10 @@ final class AppModel {
         let generation = indexGeneration
         let assets = allAssets
         let mapFilters = filtersAffectMap ? filters : PhotoFilters()
+        let albumIDs = albumAssetIDs
         indexTask = Task {
             let built = await Task.detached(priority: .userInitiated) {
-                SpatialIndex(assets: Self.applySelection(assets, filters: mapFilters))
+                SpatialIndex(assets: Self.applySelection(assets, filters: mapFilters, albumIDs: albumIDs))
             }.value
             guard !Task.isCancelled, generation == self.indexGeneration else { return }
             self.heatIndex = built
@@ -197,9 +247,9 @@ extension AppModel {
     /// item within `pageDays` of the first one in the page, whichever is more.
     nonisolated static func pageEnd(in sorted: [GeoAsset], from start: Int) -> Int {
         guard start < sorted.count else { return sorted.count }
-        let byCount = min(sorted.count, start + pageSize)
+        let byCount = min(sorted.count, start + GridPaging.pageSize)
         guard let anchor = sorted[start].date else { return byCount }
-        let cutoff = anchor.addingTimeInterval(-Double(pageDays) * 86_400)
+        let cutoff = anchor.addingTimeInterval(-Double(GridPaging.pageDays) * 86_400)
         var end = start
         while end < sorted.count, let d = sorted[end].date, d >= cutoff {
             end += 1
@@ -414,7 +464,13 @@ extension AppModel {
             return
         }
         if delta.albumListChanged {
-            Task { self.userAlbums = await self.indexer.fetchUserAlbums() }
+            Task {
+                self.userAlbums = await self.indexer.fetchUserAlbums()
+                self.albums = await self.indexer.fetchAllAlbums()
+            }
+        }
+        if delta.selectedAlbumChanged {
+            Task { await self.refreshSelectedAlbum() }
         }
 
         var didChange = false
@@ -448,7 +504,7 @@ extension AppModel {
             ThumbnailProvider.shared.invalidate(ids: delta.changedIDs + delta.removedIDs)
         }
 
-        if didChange || delta.selectedAlbumChanged {
+        if didChange {
             rebuildIndex(fitMap: false, resetPage: false)
         }
     }

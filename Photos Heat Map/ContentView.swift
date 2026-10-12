@@ -30,6 +30,14 @@ struct ContentView: View {
         .frame(minWidth: 760, minHeight: 480)
         .task { model.startIfNeeded() }
         .toolbar {
+            ToolbarItemGroup(placement: .navigation) {
+                LibraryMenu()
+                AlbumMenu()
+                    .disabled(model.phase != .ready)
+                if model.isLoadingAlbum {
+                    ProgressView().controlSize(.small)
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     model.reload()

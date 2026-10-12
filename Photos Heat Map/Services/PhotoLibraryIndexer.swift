@@ -70,6 +70,88 @@ actor PhotoLibraryIndexer {
 
     // MARK: - Albums
 
+    /// Smart albums worth offering, in display order. The "User Library" smart album
+    /// is the whole library and is represented by `AlbumInfo.entireLibrary` instead.
+    private static let smartAlbumSubtypes: [PHAssetCollectionSubtype] = [
+        .smartAlbumFavorites,
+        .smartAlbumRecentlyAdded,
+        .smartAlbumVideos,
+        .smartAlbumSelfPortraits,
+        .smartAlbumLivePhotos,
+        .smartAlbumPanoramas,
+        .smartAlbumTimelapses,
+        .smartAlbumSlomoVideos,
+        .smartAlbumBursts,
+        .smartAlbumScreenshots,
+        .smartAlbumDepthEffect,
+        .smartAlbumAnimated,
+        .smartAlbumLongExposures,
+        .smartAlbumRAW,
+        .smartAlbumCinematic,
+    ]
+
+    /// Every album for the album picker: the whole library first, then the smart
+    /// albums above, then the user's albums and shared albums (each with the number
+    /// of images + videos it contains).
+    func fetchAllAlbums() -> [AlbumInfo] {
+        var albums: [AlbumInfo] = [.entireLibrary]
+        let countOptions = Self.allMediaFetchOptions()
+
+        var smart: [(Int, AlbumInfo)] = []
+        let smartResult = PHAssetCollection.fetchAssetCollections(with: .smartAlbum, subtype: .any, options: nil)
+        smartResult.enumerateObjects { collection, _, _ in
+            guard let order = Self.smartAlbumSubtypes.firstIndex(of: collection.assetCollectionSubtype) else { return }
+            let count = PHAsset.fetchAssets(in: collection, options: countOptions).count
+            guard count > 0 else { return }
+            smart.append((order, AlbumInfo(id: collection.localIdentifier,
+                                           title: collection.localizedTitle ?? "Smart Album",
+                                           kind: .smart,
+                                           count: count,
+                                           canAddContent: false)))
+        }
+        albums += smart.sorted { $0.0 < $1.0 }.map(\.1)
+
+        var user: [AlbumInfo] = []
+        var shared: [AlbumInfo] = []
+        let albumResult = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any, options: nil)
+        albumResult.enumerateObjects { collection, _, _ in
+            let count = PHAsset.fetchAssets(in: collection, options: countOptions).count
+            let isShared = collection.assetCollectionSubtype == .albumCloudShared
+            let info = AlbumInfo(id: collection.localIdentifier,
+                                 title: collection.localizedTitle ?? "Untitled",
+                                 kind: isShared ? .shared : .user,
+                                 count: count,
+                                 canAddContent: collection.canPerform(.addContent))
+            if isShared { shared.append(info) } else { user.append(info) }
+        }
+        let byTitle: (AlbumInfo, AlbumInfo) -> Bool = { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        albums += user.sorted(by: byTitle)
+        albums += shared.sorted(by: byTitle)
+        return albums
+    }
+
+    /// Identifiers of every image/video in the album, or nil for the whole library.
+    /// Also remembers the album's fetch result so membership changes are noticed.
+    func albumMembership(albumID: String?) -> Set<String>? {
+        guard let albumID, albumID != AlbumInfo.libraryID else {
+            albumFetchResult = nil
+            return nil
+        }
+        let collections = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [albumID], options: nil)
+        guard let collection = collections.firstObject else {
+            albumFetchResult = nil
+            return nil
+        }
+        let result = PHAsset.fetchAssets(in: collection, options: Self.allMediaFetchOptions())
+        albumFetchResult = result
+        var ids = Set<String>()
+        ids.reserveCapacity(result.count)
+        result.enumerateObjects { asset, _, _ in
+            ids.insert(asset.localIdentifier)
+        }
+        return ids
+    }
+
     /// Regular user albums that accept new content, sorted by title.
     func fetchUserAlbums() -> [AlbumInfo] {
         let result = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumRegular, options: nil)
